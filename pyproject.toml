@@ -1,0 +1,17 @@
+[project]
+name = "lasair"
+version = "0.1.0"
+description = "A SkyPortal micro-service to ingest LSST objects from the Lasair broker"
+authors = [
+  { name = "Michael Coughlin", email = "cough052@umn.edu" }
+]
+license = "MIT"
+readme = "README.md"
+dependencies = [
+  "lasair",
+]
+
+[tool.compatibility]
+compatible-with = [
+  { name = "skyportal", version = ">=1.4.0" }
+]

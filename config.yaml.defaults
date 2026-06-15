@@ -1,0 +1,52 @@
+services:
+    external:
+        lasair:
+            repo: https://github.com/skyportal/lasair-skyportal-plugin.git
+            rev: main
+            params:
+                lasair:
+                    # Lasair API token (https://lasair.lsst.ac.uk/ -> My Profile).
+                    token: your_lasair_token
+                    endpoint: https://api.lasair.lsst.ac.uk/api
+                    limit_per_batch: 10000
+                    # seconds to sleep between paginated query batches.
+                    request_sleep: 0.1
+                    # concurrent workers for per-object lightcurve fetches (the
+                    # dominant cost; ~3x faster than serial at 4). The plugin
+                    # backs off automatically if Lasair rate-limits.
+                    fetch_workers: 4
+                ingest:
+                    # Re-run every query against Lasair this often (seconds).
+                    poll_interval: 86400
+                    # Objects fetched per DB write batch.
+                    batch_size: 200
+                    group_ids:
+                        - 1
+                    lsst_instrument_name: LSST
+                    lsst_stream_ids: []
+                    # SkyPortal filter ids to register every object as a Candidate
+                    # under (so it becomes scannable). Leave empty to ingest
+                    # Objs + photometry only.
+                    filter_ids: []
+                    # AB zeropoint for raw nJy psfFlux (2.5*log10(3631e9)).
+                    zp: 31.4
+                    fetch_cutouts: true
+                    cutout_workers: 4
+                    # Lasair SQL queries to run each cycle. `fields` MUST select
+                    # objects.diaObjectId, objects.ra and objects.decl; any other
+                    # selected columns are stored as a `lasair` annotation. Add
+                    # more entries to ingest several Lasair selections.
+                    queries:
+                        - name: nightly
+                          fields: >-
+                              objects.diaObjectId, objects.ra, objects.decl,
+                              crossmatch_tns.tns_name AS "tns_name",
+                              crossmatch_tns.type AS "tns_type",
+                              sherlock_classifications.classification AS "sherlock_class"
+                          tables: objects,sherlock_classifications,crossmatch_tns
+                          conditions: >-
+                              objects.nDiaSources > 2
+                              AND sherlock_classifications.separationArcsec < 0.5
+                              AND sherlock_classifications.classification NOT IN ("ORPHAN", "VS")
+                              AND (objects.glat > 10 OR objects.glat < -10)
+                              AND objects.firstDiaSourceMjdTai > (mjdnow() - 40)
