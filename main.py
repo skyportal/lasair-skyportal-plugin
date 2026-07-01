@@ -72,6 +72,8 @@ LSST_FILTER_MAP = {
 # Lasair cutout image kind -> SkyPortal thumbnail type
 THUMBNAIL_TYPES = [("Science", "new"), ("Template", "ref"), ("Difference", "sub")]
 MAX_PHOT_ROWS_PER_POST = 8000  # keep each aggregated post under SkyPortal's cap
+# ingest keys a query may override to route its objects (else the ingest default)
+PER_QUERY_ROUTING_KEYS = ("group_ids", "filter_ids", "lsst_stream_ids")
 
 
 def _json_safe(o):
@@ -386,6 +388,23 @@ def _cutout_worker(obj_id, image_urls):
         DBSession.remove()
 
 
+def _survey_thumbnail_worker(obj_id, survey_thumbnails):
+    """Generate SkyPortal's external survey cutouts (SDSS/Legacy Survey DR10/PS1)
+    for a new obj via ``Obj.add_linked_thumbnails`` (which commits). Runs on a
+    pool thread since PS1 does a live external request; own session like
+    _cutout_worker."""
+    session_context_id.set(uuid.uuid4().hex)
+    try:
+        with DBSession() as s:
+            obj = s.scalar(sa.select(Obj).where(Obj.id == obj_id))
+            if obj is not None:
+                obj.add_linked_thumbnails(list(survey_thumbnails), s)
+    except Exception as e:
+        log(f"Failed to add survey thumbnails for {obj_id}: {e}")
+    finally:
+        DBSession.remove()
+
+
 # --- Ingestion -------------------------------------------------------------
 
 
@@ -395,6 +414,16 @@ def _annotation_data(row):
     skip = {"diaObjectId", "ra", "decl", "dec"}
     data = {k: v for k, v in row.items() if k not in skip and v is not None}
     return _json_safe(data) if data else None
+
+
+def query_ingest_cfg(ingest_cfg, query):
+    """Overlay a query's routing keys onto the ingest config so queries can feed
+    different groups/filters. A key set on the query (even []) wins."""
+    merged = dict(ingest_cfg)
+    for key in PER_QUERY_ROUTING_KEYS:
+        if query.get(key) is not None:
+            merged[key] = query[key]
+    return merged
 
 
 def process_batch(
@@ -440,13 +469,22 @@ def process_batch(
         )
     session.commit()
 
-    # 2. dispatch cutouts for newly-created objs (off the DB hot path)
-    if cutout_pool is not None and ingest_cfg.get("fetch_cutouts", True):
+    # 2. dispatch cutouts for new objs off the DB hot path: Lasair
+    #    Science/Template/Difference thumbnails + optional SDSS/DR10/PS1 surveys.
+    if cutout_pool is not None:
         new_set = set(new_ids)
+        want_cutouts = ingest_cfg.get("fetch_cutouts", True)
+        survey_thumbnails = ingest_cfg.get("survey_thumbnails") or []
+        dispatched = set()
         for f in fetched:
-            if f["id"] in new_set and f.get("image_urls"):
-                new_set.discard(f["id"])  # one fetch per obj
-                cutout_pool.submit(_cutout_worker, f["id"], f["image_urls"])
+            oid = f["id"]
+            if oid not in new_set or oid in dispatched:
+                continue
+            dispatched.add(oid)  # one dispatch per new obj
+            if want_cutouts and f.get("image_urls"):
+                cutout_pool.submit(_cutout_worker, oid, f["image_urls"])
+            if survey_thumbnails:
+                cutout_pool.submit(_survey_thumbnail_worker, oid, survey_thumbnails)
 
     # 3. aggregate + post photometry in one call
     acc, seen = _new_phot_acc(), set()
@@ -552,6 +590,8 @@ def run_poll(L, *, lasair_cfg, ingest_cfg, instrument_id, user, cutout_pool):
     fetch_workers = int(lasair_cfg.get("fetch_workers", 4))
 
     for query in queries:
+        # per-query group/filter/stream overrides (else the ingest defaults)
+        query_cfg = query_ingest_cfg(ingest_cfg, query)
         rows = query_objects(L, query, limit_per_batch, request_sleep)
         log(f"[{query.get('name', 'query')}] {len(rows)} objects to ingest")
 
@@ -565,10 +605,10 @@ def run_poll(L, *, lasair_cfg, ingest_cfg, instrument_id, user, cutout_pool):
                     continue
                 buffer.append(fetched)
                 if len(buffer) >= batch_size:
-                    _flush(buffer, ingest_cfg, instrument_id, user, cutout_pool)
+                    _flush(buffer, query_cfg, instrument_id, user, cutout_pool)
                     buffer = []
         if buffer:
-            _flush(buffer, ingest_cfg, instrument_id, user, cutout_pool)
+            _flush(buffer, query_cfg, instrument_id, user, cutout_pool)
 
 
 def _flush(buffer, ingest_cfg, instrument_id, user, cutout_pool):

@@ -20,6 +20,8 @@ services:
                     poll_interval: 86400
                     # Objects fetched per DB write batch.
                     batch_size: 200
+                    # Default routing for every query; a query may override
+                    # group_ids / filter_ids / lsst_stream_ids (see `queries`).
                     group_ids:
                         - 1
                     lsst_instrument_name: LSST
@@ -32,10 +34,16 @@ services:
                     zp: 31.4
                     fetch_cutouts: true
                     cutout_workers: 4
+                    # SkyPortal external survey cutouts per new obj: "sdss"
+                    # (DR18), "ls" (Legacy Survey DR10), "ps1". PS1 is a live
+                    # external request; drop it or set [] to disable.
+                    survey_thumbnails: ["sdss", "ls", "ps1"]
                     # Lasair SQL queries to run each cycle. `fields` MUST select
                     # objects.diaObjectId, objects.ra and objects.decl; any other
-                    # selected columns are stored as a `lasair` annotation. Add
-                    # more entries to ingest several Lasair selections.
+                    # selected columns are stored as a `lasair` annotation.
+                    # A query may override group_ids / filter_ids /
+                    # lsst_stream_ids to route its objects (an override wins even
+                    # if [], else the ingest defaults above).
                     queries:
                         - name: nightly
                           fields: >-
@@ -50,3 +58,11 @@ services:
                               AND sherlock_classifications.classification NOT IN ("ORPHAN", "VS")
                               AND (objects.glat > 10 OR objects.glat < -10)
                               AND objects.firstDiaSourceMjdTai > (mjdnow() - 40)
+                        # Example: a second query routed to a different group +
+                        # filter (its own scanning page), independent of `nightly`.
+                        # - name: bright-transients
+                        #   group_ids: [2]
+                        #   filter_ids: [5]
+                        #   fields: 'objects.diaObjectId, objects.ra, objects.decl'
+                        #   tables: objects
+                        #   conditions: 'objects.nDiaSources > 2'
